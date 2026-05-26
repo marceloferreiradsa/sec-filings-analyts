@@ -54,3 +54,5 @@ DEPLOYMENT.md
 
 # Test scripts archive
 src_archive/
+test_ragas*.py
+test_truncation.py

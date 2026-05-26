@@ -1,10 +1,10 @@
 # Core RAG pipeline
 openai>=1.30.0
 ragas==0.4.3
-langchai-openai>=0.3.0
+langchain-openai>=0.3.0
 faiss-cpu>=1.8.0
 numpy>=1.26.0
-sentence-transformers>=3.0.0
+sentence-transformers>=3.0.0c
 
 # SEC filing download
 sec-edgar-downloader>=5.0.0

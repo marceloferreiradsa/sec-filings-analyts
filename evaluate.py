@@ -154,6 +154,20 @@ SMOKE_QUESTIONS = [
 ]
 
 
+# Questions where low RAGAS scores indicate CORRECT behavior (refusal tests).
+# These are included in RAGAS evaluation but reported with expected scores so
+# that 0.00 answer relevancy is interpreted as PASS, not FAIL.
+# Structure: label -> {metric -> expected_value, "note" -> explanation}
+RAGAS_BOUNDARY = {
+    "Boundary": {
+        "faithfulness"    : 1.0,  # refusal has no unsupported claims
+        "context_util"    : 0.0,  # refusal correctly ignores irrelevant context
+        "answer_relevancy": 0.0,  # refusal doesn't address Q — correct behavior
+        "note": "refusal test: system should NOT answer; low AR/CU are correct",
+    }
+}
+
+
 # ─── Result containers ───────────────────────────────────────────────────────
 
 @dataclass
@@ -394,148 +408,232 @@ Reply with a single decimal number between 0 and 1. 1.0 = all relevant. 0.0 = no
 
 def run_real_ragas(qa: QA) -> None:
     """
-    Real RAGAS evaluation using the ragas 0.4.x library.
+    Real RAGAS evaluation using the ragas 0.4.x collections API.
 
-    ragas 0.4.x has a broken import of langchain_community.chat_models.vertexai,
-    which was removed from langchain-community in 0.3+. The two-line stub below
-    satisfies the import without loading VertexAI — since we use OpenAI for
-    evaluation, the VertexAI code path is never reached.
+    METRICS
+      Faithfulness       — decomposes each answer into individual claims and checks
+                           each claim against the retrieved context separately.
+                           Per-claim analysis is the reference standard for RAG
+                           faithfulness and what job descriptions mean by "RAGAS".
+      ContextUtilization — checks whether retrieved chunks were actually useful for
+                           generating the response (no reference answer needed).
+      AnswerRelevancy    — generates N questions from the answer and measures cosine
+                           similarity to the original question via embeddings.
 
-    The real RAGAS faithfulness metric extracts individual claims from the answer
-    and checks each one against the context separately. This per-claim analysis
-    is more rigorous than our custom aggregate evaluator and is why real RAGAS
-    takes longer (~5 minutes) and costs more (~$0.05-0.15).
+    API NOTES (ragas 0.4.x collections, confirmed from docs.ragas.io)
+      Collections metrics use .score() per sample — NOT the legacy evaluate().
+        Faithfulness:       score(user_input, response, retrieved_contexts)
+        ContextUtilization: score(user_input, response, retrieved_contexts)
+        AnswerRelevancy:    score(user_input, response)  ← no retrieved_contexts
+      LLM:        llm_factory("gpt-4o-mini", client=AsyncOpenAI())
+      Embeddings: embedding_factory("openai", model=..., client=...) from .base
 
-    Usage:     python evaluate.py --mode ragas-real
-    Cost:      ~$0.05-0.15  (per-claim claim extraction + checking)
-    Run when:  major changes — embedding model, chunk strategy, system prompt
+    FAITHFULNESS TRUNCATION (Architectural Decision #12)
+      response is truncated to FAITHFULNESS_MAX_CHARS before Faithfulness scoring.
+      Reason: ragas uses instructor internally for claim extraction. gpt-4o-mini hits
+      instructor's token budget on answers with 15+ claims, causing InstructorRetryException.
+      1350 chars captures full substantive content of our longest answers while keeping
+      claim count to ~12-15, within budget.
+      Rejected: gpt-4o evaluator — evaluator-generator mismatch, breaks baseline
+      comparability, raises (not removes) the ceiling.
+
+    BOUNDARY QUESTION HANDLING
+      Refusal questions (e.g. future predictions) produce low RAGAS scores by design:
+      AnswerRelevancy≈0 (refusal doesn't address Q), ContextUtil≈0 (context not used).
+      These are CORRECT behaviors, not failures. RAGAS_BOUNDARY declares expected scores
+      so 0.00 reads as ✓ in the output. Two aggregate lines are reported:
+        "All questions"     — use for regression detection (consistent across runs)
+        "Answerable only"   — use for absolute quality assessment
+
+    KNOWN LIMITATION: HIGH VARIANCE
+      Faithfulness scores on multi-company questions vary between runs (e.g. 0.33–0.94)
+      because ragas uses an LLM internally with non-zero temperature for claim extraction.
+      Treat faithfulness as a directional indicator, not a precise metric. Run 2-3 times
+      on major changes and compare the range rather than a single number.
+
+    Usage:  python evaluate.py --mode ragas-real
+    Cost:   ~$0.05-0.15  ·  Time: 3-8 minutes  ·  Run on major changes only
     """
-    # ── Stub fix for broken ragas 0.4.x dependency ────────────────────────
+    FAITHFULNESS_MAX_CHARS = 1350
+
+    # ── Stub: fix broken ragas 0.4.x import ───────────────────────────────────
+    # ragas imports langchain_community.chat_models.vertexai at load time but
+    # this module was removed in langchain-community 0.3+. Register an empty stub
+    # before importing ragas so the load succeeds. VertexAI code path never runs.
     import sys, types
     _BROKEN = "langchain_community.chat_models.vertexai"
     if _BROKEN not in sys.modules:
         _stub = types.ModuleType(_BROKEN)
-        _stub.ChatVertexAI = type("ChatVertexAI", (), {})  # empty placeholder class
+        _stub.ChatVertexAI = type("ChatVertexAI", (), {})
         sys.modules[_BROKEN] = _stub
-        # Register on parent module so attribute lookup also works
         import langchain_community.chat_models as _cm
         if not hasattr(_cm, "vertexai"):
             setattr(_cm, "vertexai", _stub)
-    # ── End stub fix ───────────────────────────────────────────────────────
 
+    # ── Imports ────────────────────────────────────────────────────────────────
     try:
-        from ragas import evaluate as ragas_evaluate
-        from ragas.metrics.collections import Faithfulness, AnswerRelevancy
-        from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+        from openai import AsyncOpenAI
+        from ragas.llms import llm_factory
+        from ragas.embeddings.base import embedding_factory
+        from ragas.metrics.collections import (
+            Faithfulness,
+            ContextUtilization,
+            AnswerRelevancy,
+        )
         import ragas as _ragas_pkg
-        _ragas_version = getattr(_ragas_pkg, "__version__", "unknown")
-        print(f"  ragas version: {_ragas_version}")
+        print(f"  ragas version: {getattr(_ragas_pkg, '__version__', 'unknown')}")
     except ImportError as exc:
-        print(f"\n[RAGAS] Import still failing after stub: {exc}")
-        print("[RAGAS] Try: pip install 'ragas>=0.4.0'")
+        print(f"\n[RAGAS] Import failed: {exc}")
         return
-    _ragas_version = _ragas_version  # used in result printing
 
-    print("\n[RAGAS] Building evaluation dataset...")
+    # ── LLM + embeddings (per docs.ragas.io) ──────────────────────────────────
+    # AsyncOpenAI required — ragas runs its pipeline asynchronously.
+    # timeout/max_retries configured on the client per Run Config docs.
+    client     = AsyncOpenAI(timeout=120.0, max_retries=3)
+    llm        = llm_factory("gpt-4o-mini", client=client)
+    embeddings = embedding_factory("openai",
+                                   model="text-embedding-3-small",
+                                   client=client)
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    faithfulness_scorer  = Faithfulness(llm=llm)
+    context_util_scorer  = ContextUtilization(llm=llm)
+    answer_rel_scorer    = AnswerRelevancy(llm=llm, embeddings=embeddings)
+    print("  Metrics: Faithfulness · ContextUtilization · AnswerRelevancy")
+
+    # ── Helper: boundary annotation ───────────────────────────────────────────
+    def _expected_note(metric, actual, boundary):
+        """Annotate scores on boundary (refusal) questions.
+        0.00 on answer_relevancy for a correct refusal should read ✓ not ⚠."""
+        if boundary is None or metric not in boundary:
+            return ""
+        expected = boundary[metric]
+        matches  = abs(actual - expected) <= 0.15
+        return "  [expected ✓]" if matches else f"  [expected {expected:.2f} ⚠]"
+
+    # ── Query the RAG system ───────────────────────────────────────────────────
+    print("\n[RAGAS] Querying the RAG system...")
     samples = []
-
     for label, question, filters in SMOKE_QUESTIONS:
-        print(f"  Querying: {label}...")
+        print(f"  {label}...")
         answer = qa.ask(question, top_k=5, filters=filters)
-        samples.append(SingleTurnSample(
-            user_input         = question,
-            response           = answer.answer_text,
-            retrieved_contexts = [c.content for c in answer.chunks_used],
-        ))
+        samples.append({
+            "label"    : label,
+            "question" : question,
+            "response" : answer.answer_text,
+            "contexts" : [c.content for c in answer.chunks_used],
+        })
 
-    dataset = EvaluationDataset(samples=samples)
+    # ── Score each sample ──────────────────────────────────────────────────────
+    # Scoring args confirmed from docs.ragas.io:
+    #   Faithfulness:       user_input, response (truncated), retrieved_contexts
+    #   ContextUtilization: user_input, response, retrieved_contexts
+    #   AnswerRelevancy:    user_input, response  (no retrieved_contexts)
+    print("\n[RAGAS] Scoring — per-claim faithfulness analysis (3-8 minutes)...")
 
-    # Official ragas 0.4.x setup (from docs.ragas.io/en/latest):
-    #   AsyncOpenAI + llm_factory for LLM
-    #   AsyncOpenAI + embedding_factory for embeddings (needed by ResponseRelevancy)
-    from openai import AsyncOpenAI as _AsyncOpenAI
-    from ragas.llms import llm_factory as _llm_factory
-    _client = _AsyncOpenAI()
-    _llm    = _llm_factory("gpt-4o-mini", client=_client)
+    results = {}   # label -> {metric: value}
 
-    # Embeddings — needed by ResponseRelevancy (AnswerRelevancy equivalent)
-    _embeddings = None
-    try:
-        from ragas.embeddings import embedding_factory as _emb_factory
-        _embeddings = _emb_factory("text-embedding-3-small", client=_client)
-        print("  Embeddings: text-embedding-3-small via embedding_factory")
-    except (ImportError, Exception) as _emb_err:
-        print(f"  Embeddings unavailable ({_emb_err}) — ResponseRelevancy will be skipped")
+    for s in samples:
+        label    = s["label"]
+        boundary = RAGAS_BOUNDARY.get(label)
+        tag      = "  [refusal test]" if boundary else ""
+        print(f"  Scoring: {label}{tag}")
+        results[label] = {}
 
-    # Build metrics list — each metric uses ragas.metrics.collections per docs
-    _metrics = [Faithfulness(llm=_llm)]
-    print("  Metric: Faithfulness")
-
-    # ResponseRelevancy = AnswerRelevancy equivalent; needs both llm + embeddings
-    if _embeddings is not None:
+        # Faithfulness — truncate to avoid instructor token overflow on long answers
         try:
-            _metrics.append(AnswerRelevancy(llm=_llm, embeddings=_embeddings))
-            print("  Metric: AnswerRelevancy (Response Relevancy)")
-        except Exception as _e:
-            print(f"  AnswerRelevancy skipped: {_e}")
+            truncated   = s["response"][:FAITHFULNESS_MAX_CHARS]
+            r           = faithfulness_scorer.score(
+                user_input         = s["question"],
+                response           = truncated,
+                retrieved_contexts = s["contexts"],
+            )
+            val  = float(r.value)
+            flag = "  (truncated)" if len(s["response"]) > FAITHFULNESS_MAX_CHARS else ""
+            results[label]["faithfulness"] = val
+            print(f"    faithfulness       {val:.2f}{flag}"
+                  f"{_expected_note('faithfulness', val, boundary)}")
+        except Exception as e:
+            print(f"    faithfulness       failed ({type(e).__name__}: {e})")
 
-    # LLMContextPrecisionWithoutReference — ragas.metrics (not .collections)
-    _cp_col = "llm_context_precision_without_reference"
-    try:
-        from ragas.metrics import LLMContextPrecisionWithoutReference as _CPWR
+        # ContextUtilization — full response
         try:
-            _metrics.append(_CPWR(llm=_llm))
-        except TypeError:
-            _metrics.append(_CPWR())
-        print("  Metric: LLMContextPrecisionWithoutReference")
-    except ImportError:
-        _cp_col = None
-        print("  LLMContextPrecisionWithoutReference not available — skipping")
+            r   = context_util_scorer.score(
+                user_input         = s["question"],
+                response           = s["response"],
+                retrieved_contexts = s["contexts"],
+            )
+            val = float(r.value)
+            results[label]["context_util"] = val
+            print(f"    context_util       {val:.2f}"
+                  f"{_expected_note('context_util', val, boundary)}")
+        except Exception as e:
+            print(f"    context_util       failed ({type(e).__name__}: {e})")
 
-    print("\n[RAGAS] Scoring with real RAGAS library...")
-    print("        Per-claim faithfulness analysis — this takes 3-8 minutes.")
-    result = ragas_evaluate(
-        dataset = dataset,
-        metrics = _metrics,
-    )
+        # AnswerRelevancy — user_input + response only (no retrieved_contexts)
+        try:
+            r   = answer_rel_scorer.score(
+                user_input = s["question"],
+                response   = s["response"],
+            )
+            val = float(r.value)
+            results[label]["answer_relevancy"] = val
+            print(f"    answer_relevancy   {val:.2f}"
+                  f"{_expected_note('answer_relevancy', val, boundary)}")
+        except Exception as e:
+            print(f"    answer_relevancy   failed ({type(e).__name__}: {e})")
 
-    # Extract scores — column names vary by ragas version
-    try:
-        df       = result.to_pandas()
-        f_score  = float(df["faithfulness"].mean())
-        ar_score = float(df["answer_relevancy"].mean())
+    # ── Aggregate — all questions and answerable only ──────────────────────────
+    def _mean(xs): return sum(xs) / len(xs) if xs else None
 
-        # Find whichever context precision column was produced
-        cp_score = None
-        for _col in ["llm_context_precision_without_reference",
-                     "context_precision_without_reference",
-                     "context_relevance", "context_relevancy"]:
-            if _col in df.columns:
-                cp_score = float(df[_col].mean())
-                cp_label = _col.replace("_", " ").title()
-                break
-    except Exception as exc:
-        print(f"[RAGAS] Could not parse results: {exc}")
-        print(result)
-        return
+    def _collect(metric):
+        all_v = [v[metric] for v in results.values()       if metric in v]
+        ans_v = [v[metric] for lbl, v in results.items()
+                 if metric in v and lbl not in RAGAS_BOUNDARY]
+        return all_v, ans_v
 
-    OK = "✓" ; WARN = "⚠"
-    sep = chr(9552) * 54
+    f_all,  f_ans  = _collect("faithfulness")
+    cu_all, cu_ans = _collect("context_util")
+    ar_all, ar_ans = _collect("answer_relevancy")
+
+    OK = "✓"; WARN = "⚠"; NA = "─"
+    sep = chr(9552) * 58
+
+    def _line(label, val, target):
+        if val is None:
+            print(f"    {NA}  {label:<24} n/a")
+        else:
+            mark = OK if val >= target else WARN
+            print(f"    {mark}  {label:<24} {val:.3f}  (target ≥{target})")
+
+    n_ans = len(results) - len(RAGAS_BOUNDARY)
     print(f"\n{sep}")
-    print("  RAGAS EVALUATION RESULTS  (ragas library, per-claim)")
+    print("  RAGAS EVALUATION RESULTS  (collections API, per-claim)")
     print(sep)
-    print(f"  {OK if f_score  >= 0.90 else WARN}  Faithfulness:      {f_score:.3f}  (target ≥0.90)")
-    print(f"  {OK if ar_score >= 0.85 else WARN}  Answer Relevancy:  {ar_score:.3f}  (target ≥0.85)")
-    if cp_score is not None:
-        print(f"  {OK if cp_score >= 0.75 else WARN}  Context Precision: {cp_score:.3f}  (target ≥0.75)  [{cp_label}]")
-    else:
-        print(f"  ─  Context Precision: not available in ragas {_ragas_version}")
+    print(f"  All {len(results)} questions (including refusal tests):")
+    _line("Faithfulness:",         _mean(f_all),  0.90)
+    _line("Context Utilization:",  _mean(cu_all), 0.75)
+    _line("Answer Relevancy:",     _mean(ar_all), 0.85)
+    print()
+    print(f"  Answerable only ({n_ans} questions — refusal tests excluded):")
+    _line("Faithfulness:",         _mean(f_ans),  0.90)
+    _line("Context Utilization:",  _mean(cu_ans), 0.75)
+    _line("Answer Relevancy:",     _mean(ar_ans), 0.85)
     print(sep)
     print()
-    print("  Faithfulness:     per-claim — each factual statement checked individually")
-    print("  Answer Relevancy: question regeneration — does answer imply the question?")
+    print("  Faithfulness        — per-claim: each statement checked against context")
+    print("  Context Utilization — per-chunk: were retrieved passages actually used?")
+    print("  Answer Relevancy    — embedding sim: does answer imply the question?")
     print()
-    return result
+    print("  'All questions' line  → use for regression detection (consistent across runs)")
+    print("  'Answerable only' line → use for absolute quality assessment")
+    print()
+    return {
+        "all":        {"faithfulness": _mean(f_all),  "context_util": _mean(cu_all),
+                       "answer_relevancy": _mean(ar_all)},
+        "answerable": {"faithfulness": _mean(f_ans),  "context_util": _mean(cu_ans),
+                       "answer_relevancy": _mean(ar_ans)},
+    }
 
 
 # ─── Output formatting ───────────────────────────────────────────────────────
