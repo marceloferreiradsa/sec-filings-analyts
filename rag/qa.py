@@ -59,7 +59,7 @@ from typing import Optional
 
 from openai import OpenAI
 
-from retrieve import Retriever, RetrievalFilters, RetrievedChunk
+from rag.retrieve import Retriever, RetrievalFilters, RetrievedChunk
 
 
 # ---------------------------------------------------------------------------

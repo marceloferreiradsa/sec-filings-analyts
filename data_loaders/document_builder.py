@@ -40,8 +40,8 @@ from typing import Optional
 
 from langchain_core.documents import Document
 
-from edgar_api import build_financial_summaries
-from html_parser import parse_filing
+from data_loaders.edgar_api import build_financial_summaries
+from data_loaders.html_parser import parse_filing
 
 
 # ---------------------------------------------------------------------------

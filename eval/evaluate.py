@@ -42,8 +42,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from retrieve import RetrievalFilters
-from qa import QA, Answer
+from rag.retrieve import RetrievalFilters
+from rag.qa import QA, Answer
 
 
 # ─── Assertion test cases ────────────────────────────────────────────────────

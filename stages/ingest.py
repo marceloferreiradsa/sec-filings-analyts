@@ -12,7 +12,7 @@ Usage:
 import json
 from pathlib import Path
 
-from document_builder import build_all_documents
+from data_loaders.document_builder import build_all_documents
 
 RAW_DATA_PATH = Path("./data/raw")
 OUTPUT_PATH   = Path("./data/processed/documents.json")

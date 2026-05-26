@@ -176,7 +176,7 @@ print("\n══ Phase 3: Retrieval ═══════════════
 ok, out, err = exec_python("""
 import sys
 sys.path.insert(0, '/app')
-from retrieve import Retriever, RetrievalFilters
+from rag.retrieve import Retriever, RetrievalFilters
 
 r = Retriever(verbose=False)
 
@@ -243,8 +243,8 @@ print("  (calls OpenAI API — takes 15-30 s)")
 ok, out, err = exec_python("""
 import sys, time
 sys.path.insert(0, '/app')
-from retrieve import RetrievalFilters
-from qa import QA
+from rag.retrieve import RetrievalFilters
+from rag.qa import QA
 
 qa = QA(verbose=False)
 
@@ -294,8 +294,8 @@ print("\n══ Phase 5: Boundary behavior ════════════�
 ok, out, err = exec_python("""
 import sys
 sys.path.insert(0, '/app')
-from retrieve import RetrievalFilters
-from qa import QA
+from rag.retrieve import RetrievalFilters
+from rag.qa import QA
 
 qa = QA(verbose=False)
 
