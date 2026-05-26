@@ -7,7 +7,8 @@ citations. The system will not speculate beyond what is written in the filings.
 **Companies covered:** Apple (AAPL) · Alphabet/Google (GOOGL) · Meta (META) · Microsoft (MSFT) · NVIDIA (NVDA)  
 **Filing types:** 10-K (annual) · 10-Q (quarterly)  
 **Period:** FY2022 – early FY2026  
-**Stack:** Python · FAISS · OpenAI Embeddings · GPT-4o-mini · Streamlit
+**Stack:** Python · FAISS · OpenAI Embeddings · GPT-4o-mini · Streamlit  
+**Live demo:** https://secrag.ainati.com.br
 
 ---
 
@@ -30,26 +31,25 @@ with citations to the exact source passage:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    INGESTION PIPELINE (run once)            │
+│                    INGESTION PIPELINE                       │
+│                    python pipeline.py                       │
 │                                                             │
-│  SEC EDGAR ──► edgar_api.py ──► XBRL summaries ──┐         │
-│    (XBRL)       Track A          formatted text   │         │
-│                                                   ├─► document_builder.py
-│  SEC EDGAR ──► html_parser.py ──► sections ───────┘         │
-│    (HTML)       Track B          Risk/MD&A/Business         │
-│                                                             │
-│         ingest.py ──► chunk.py ──► embed.py ──► index.py   │
-│         documents     chunks       vectors       FAISS      │
+│  SEC EDGAR ──► data_loaders/ ──────────────────────┐       │
+│    XBRL         edgar_api.py   financial summaries  │       │
+│    HTML         html_parser.py narrative sections   ├─► document_builder.py
+│                                                     │       │
+│         stages/ingest.py ──► chunk.py ──► embed.py ──► index.py
+│         documents              chunks      vectors      FAISS
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │                    QUERY PIPELINE (real-time)               │
 │                                                             │
-│  Question ──► retrieve.py ──► top-k chunks ──► qa.py       │
-│               FAISS + filters   with metadata   GPT-4o-mini │
-│                                                   │         │
-│  app.py (Streamlit) ◄────────────────────────────┘         │
-│  Filters · Citations · Context toggle                       │
+│  Question ──► rag/retrieve.py ──► top-k chunks ──► rag/qa.py
+│               FAISS + filters      with metadata    GPT-4o-mini
+│                                                      │      │
+│  app.py (Streamlit) ◄────────────────────────────────┘      │
+│  Filters · Citations · Context toggle                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,16 +71,16 @@ retrieval layer.
 ## Key design decisions
 
 Five decisions distinguish this system from standard RAG tutorials.
-The full rationale for all eleven architectural decisions is in
-[ARCHITECTURAL_DECISIONS.md](ARCHITECTURAL_DECISIONS.md).
+The full rationale for all architectural decisions is in
+[docs/ARCHITECTURAL_DECISIONS.md](docs/ARCHITECTURAL_DECISIONS.md).
 
 | Decision | What and why |
 |----------|-------------|
 | Natural-language number rendering | Raw XBRL integers do not embed semantically. Values are formatted in billions and margins are pre-computed so financial data is retrievable by meaning. |
 | Exact FAISS search (IndexFlatIP) | At 6,396 vectors, exact search takes <2ms. Approximate indexes trade accuracy for imperceptible speed gains at this scale. |
-| ASC 606 combine strategy | The 2018 accounting standard change split the revenue concept across two XBRL tags. Entries from all candidate tags are pooled before deduplication for metrics that are tag renames of the same concept. |
-| Per-company retrieval | Multi-company queries with combined filters produce asymmetric results — one company's vocabulary dominates. Separate calibrated searches per company guarantee equal representation. |
-| Post-filter with n=ntotal | For IndexFlatIP, all inner products are computed regardless of k. Requesting all candidates costs nothing extra and guarantees sparse categories (financial summaries = 0.6% of index) are always reachable. |
+| ASC 606 combine strategy | The 2018 accounting standard change split the revenue concept across two XBRL tags. Entries from all candidate tags are pooled before deduplication. |
+| Per-company retrieval diversity | Multi-company queries can be dominated by one company's vocabulary. Per-company diversity enforcement guarantees equal representation in context. |
+| Post-filter with n=ntotal | For IndexFlatIP, all inner products are computed regardless of k. Requesting all candidates costs nothing extra and guarantees sparse categories are always reachable. |
 
 ---
 
@@ -89,26 +89,44 @@ The full rationale for all eleven architectural decisions is in
 ```
 sec-filings-analyst/
 │
-├── app.py               Streamlit web interface
-├── qa.py                LLM answer generation (GPT-4o-mini)
-├── retrieve.py          FAISS retrieval with metadata filtering
-├── index.py             Build FAISS index from embeddings
-├── embed.py             Embed chunks with text-embedding-3-small
-├── chunk.py             Section-aware chunking
-├── ingest.py            Pipeline orchestrator
-├── document_builder.py  Assemble Track A + Track B documents
-├── edgar_api.py         Track A: XBRL financial data from SEC API
-├── html_parser.py       Track B: HTML narrative section extraction
+├── app.py               Streamlit web interface (Docker entry point)
+├── pipeline.py          Build orchestrator — runs the full pipeline or individual stages
 │
-├── ARCHITECTURAL_DECISIONS.md   All 11 design decisions with rationale
-├── NEXT_FEATURES.md             Documented improvement roadmap
-├── requirements.txt
-├── .env.example
+├── rag/                 Runtime: retrieval and generation
+│   ├── retrieve.py      FAISS retrieval with metadata filtering
+│   └── qa.py            LLM answer generation (GPT-4o-mini)
 │
-└── data/                        Generated by pipeline (git-ignored)
-    ├── raw/             Downloaded SEC filings
-    ├── processed/       documents.json · chunks.json · embeddings.npy
-    └── index/           index.faiss
+├── stages/              Build pipeline stages
+│   ├── ingest.py        Download filings and build documents
+│   ├── chunk.py         Section-aware chunking
+│   ├── embed.py         Embed chunks with text-embedding-3-small
+│   └── index.py         Build FAISS index from embeddings
+│
+├── data_loaders/        Raw data parsers
+│   ├── edgar_api.py     Track A: XBRL financial data from SEC API
+│   ├── html_parser.py   Track B: HTML narrative section extraction
+│   └── document_builder.py  Assemble Track A + Track B into unified documents
+│
+├── eval/
+│   └── evaluate.py      RAGAS evaluation · smoke tests · assertion suite
+│
+├── tests/
+│   └── test_deployment.py  Pre-deployment container validation (20 checks)
+│
+├── docs/
+│   ├── ARCHITECTURAL_DECISIONS.md   All design decisions with rationale
+│   ├── NEXT_FEATURES.md             Improvement roadmap with effort estimates
+│   └── DEPLOYMENT.md                VPS deployment and ops guide
+│
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt         Production (4 packages: openai, faiss-cpu, numpy, streamlit)
+├── requirements-dev.txt     Development (adds pipeline and evaluation tools)
+│
+└── data/                    Generated by pipeline (git-ignored)
+    ├── raw/                 Downloaded SEC filings
+    ├── processed/           chunks.json · embeddings.npy
+    └── index/               index.faiss · chunks.json
 ```
 
 ---
@@ -118,7 +136,7 @@ sec-filings-analyst/
 ### Prerequisites
 - Python 3.10+
 - OpenAI API key
-- ~2GB disk space for downloaded filings
+- ~2 GB disk space for downloaded filings
 - ~$0.05 to run the full embedding pipeline
 
 ### Installation
@@ -130,51 +148,37 @@ cd sec-filings-analyst
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # includes pipeline and evaluation tools
 ```
 
 ### Configuration
 
-The system reads `OPENAI_API_KEY` from the OS environment. No `.env` file
-is needed or recommended — setting the key as a system variable keeps it
-out of the filesystem and out of git history entirely.
+The system reads `OPENAI_API_KEY` from the OS environment.
 
-**Windows (permanent, current user):**
+**Windows (permanent):**
 ```powershell
 [System.Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "sk-your-key-here", "User")
-# Restart your terminal after setting
 ```
 
-**Windows (current session only):**
-```powershell
-$env:OPENAI_API_KEY = "sk-your-key-here"
-```
-
-**Linux / macOS (permanent):**
+**Linux / macOS:**
 ```bash
-echo 'export OPENAI_API_KEY=sk-your-key-here' >> ~/.bashrc
-source ~/.bashrc
+echo 'export OPENAI_API_KEY=sk-your-key-here' >> ~/.bashrc && source ~/.bashrc
 ```
-
-`.env.example` documents the required variable name for reference.
-`python-dotenv` is not required — the system reads directly from the OS
-environment, which is the correct practice for keeping secrets out of
-the filesystem and git history.
 
 ### Run the pipeline
 
-Each step builds on the previous. Run them in order once to set up the corpus.
-
 ```bash
-python ingest.py     # Download filings + build XBRL summaries + parse HTML
-python chunk.py      # Split documents into retrievable chunks
-python embed.py      # Embed chunks with text-embedding-3-small (~$0.03)
-python index.py      # Build FAISS index
+python pipeline.py               # full pipeline (ingest → chunk → embed → index)
+python pipeline.py --only embed  # single stage
+python pipeline.py --from chunk  # from a stage onwards
+python pipeline.py --status      # check what has been built
 ```
 
-Pipeline outputs are saved to `data/` and git-ignored. Re-run from any step
-to update — for example, re-run from `chunk.py` if you change chunk size,
-or from `embed.py` if you change the embedding model.
+Each stage builds on the previous. Re-run from any step to update — for example,
+re-run from `embed` if you change the embedding model, or from `chunk` if you
+change chunk size.
+
+Approximate cost for the full corpus: ~$0.028 in OpenAI embedding charges.
 
 ### Use the system
 
@@ -183,30 +187,16 @@ or from `embed.py` if you change the embedding model.
 streamlit run app.py
 ```
 
-**Interactive command line:**
+**Evaluation:**
 ```bash
-python qa.py -i                     # interactive mode
-python qa.py -i --show-context      # show retrieved passages
-```
-
-**Single question:**
-```bash
-python qa.py -q "What risks did NVIDIA flag in its FY2025 annual report?"
-python qa.py -q "Compare MSFT and GOOGL cloud revenue growth" --show-context
-```
-
-**Test suite (5 pre-built test cases):**
-```bash
-python qa.py                        # answers only
-python qa.py --show-context         # context + answers
+python -m eval.evaluate --mode smoke      # 5 health checks (~$0.002)
+python -m eval.evaluate --mode all        # smoke + 20 assertion tests
+python -m eval.evaluate --mode ragas-real # full RAGAS scoring (~$0.10)
 ```
 
 ---
 
 ## Query examples
-
-The Streamlit interface includes six clickable example questions. Additional
-examples covering different query types:
 
 **Financial performance**
 - "What were NVIDIA's revenues and margins in FY2024 compared to FY2023?"
@@ -247,26 +237,23 @@ the default "All" or "Narrative only."
 
 ## Known limitations
 
-**Fiscal calendar alignment.** Financial summaries are organised by company
-fiscal year, not calendar year. For companies with non-December fiscal year
-ends (NVIDIA ends January, Apple ends September, Microsoft ends June),
-queries specifying calendar years may not find a direct match. Use fiscal
-year terminology — "NVIDIA FY2025" or "Apple FY2025" — for reliable results.
+**Fiscal calendar alignment.** NVIDIA ends January, Apple ends September,
+Microsoft ends June. Queries specifying calendar years may not find a direct
+match. Use fiscal year terminology — "NVIDIA FY2025" — for reliable results.
 
 **"Latest" is semantic, not temporal.** The retriever ranks by semantic
-similarity, not by recency. Queries for "the latest" figures may return older
-periods if they score higher semantically. Adding a year filter or selecting
-"Financial data only" with the most recent year mitigates this.
+similarity, not recency. Adding a year filter or selecting "Financial data only"
+mitigates this. Feature 9 (intelligent query understanding) will resolve this
+automatically.
 
-**Corpus boundary.** The system covers five companies over approximately four
-years. Questions about other companies, earlier periods, or forward-looking
-projections will be correctly declined — the system refuses to speculate beyond
-what is in the retrieved passages.
+**Corpus boundary.** Covers five companies over approximately four years.
+Questions about other companies, earlier periods, or forward-looking projections
+are correctly declined.
 
-**Segment-level data.** Company-specific XBRL extension tags (e.g.
-`nvda:DataCenterRevenue`) are not currently indexed. Revenue figures are
-consolidated totals. Segment breakdown questions are partially answered from
-narrative MD&A sections.
+**Segment-level data.** Company-specific XBRL extension tags
+(e.g. `nvda:DataCenterRevenue`) are not currently indexed. Revenue figures
+are consolidated totals. Segment breakdown questions are partially answered
+from narrative MD&A sections.
 
 ---
 
@@ -276,62 +263,58 @@ narrative MD&A sections.
 |-----------|------|
 | Full pipeline embedding (6,396 chunks) | ~$0.028 |
 | Single query (retrieve + GPT-4o-mini) | ~$0.0005 |
-| Five-question test suite | ~$0.002 |
-
-All costs are OpenAI API charges. FAISS search and pipeline processing
-are local and free.
+| Smoke test suite (5 questions) | ~$0.002 |
+| Full RAGAS evaluation | ~$0.10 |
 
 ---
 
-## Roadmap
+## Evaluation baseline
 
-Eight planned improvements are documented with implementation paths and
-effort estimates in [NEXT_FEATURES.md](NEXT_FEATURES.md). Priority order:
-
-1. **Section selection via config file** — move `SECTIONS_TO_INDEX` to
-   `config.yaml` for code-free configuration
-2. **Cross-encoder re-ranking** — re-rank top-20 candidates with a
-   cross-encoder for higher retrieval precision
-3. **User feedback loop** — thumbs up/down logging to accumulate
-   fine-tuning data
-4. **Hybrid retrieval sidecar** — preserve raw XBRL values alongside
-   formatted summaries for exact numeric lookup on demand
-5. **On-demand chart generation** — Plotly charts for trend and
-   comparison queries (depends on #4)
+| Metric | Score |
+|--------|-------|
+| Faithfulness | 0.962 |
+| Answer Relevancy (answerable questions) | 0.928 |
+| Smoke tests | 5/5 |
+| Deployment tests | 20/20 |
 
 ---
 
 ## Deployment
 
-### Local
+The production deployment uses Docker with nginx as a reverse proxy.
+Full instructions in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+**Quick start (local Docker):**
 ```bash
-streamlit run app.py
+docker build -t sec-filings-analyst .
+docker run -p 8501:8501 -e OPENAI_API_KEY=$OPENAI_API_KEY sec-filings-analyst
 ```
 
-### VPS
+**Pre-deployment validation:**
 ```bash
-export OPENAI_API_KEY=sk-...
-streamlit run app.py --server.port 8501 --server.headless true
+docker run -d -p 8501:8501 -e OPENAI_API_KEY=$OPENAI_API_KEY --name sec-analyst sec-filings-analyst
+python tests/test_deployment.py   # 20 checks across 5 phases
 ```
 
-Configure nginx as a reverse proxy for port 80/443. Only the following
-files are required on the server — the full pipeline does not need to run
-there:
+The production image contains only 4 packages (openai, faiss-cpu, numpy,
+streamlit) and the `rag/` package. Build time ~2 minutes, image size ~400 MB.
 
-```
-app.py  retrieve.py  qa.py
-data/index/index.faiss
-data/processed/chunks.json
-requirements.txt
-```
+---
 
-Transfer the index with:
-```bash
-rsync -avz data/index/ data/processed/chunks.json \
-    user@your-vps:/path/to/app/data/
-```
+## Roadmap
 
-Docker deployment instructions are in progress.
+Full feature specifications with implementation paths and effort estimates
+are in [docs/NEXT_FEATURES.md](docs/NEXT_FEATURES.md).
+
+**Next priorities:**
+
+1. **Intelligent query understanding (Feature 9)** — LLM pre-filtering that
+   extracts company, period, and intent from natural language automatically.
+   Eliminates the need for manual sidebar filters.
+2. **Cross-encoder re-ranking (Feature 4)** — re-rank top-20 candidates with
+   a cross-encoder for higher retrieval precision.
+3. **User feedback loop (Feature 5)** — thumbs up/down logging to accumulate
+   fine-tuning data over time.
 
 ---
 
