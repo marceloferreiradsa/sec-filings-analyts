@@ -1,0 +1,29 @@
+# docker-compose.yml
+#
+# Usage:
+#   docker compose up -d          start in background
+#   docker compose down           stop and remove container
+#   docker compose logs -f        stream logs
+#   docker compose up -d --build  rebuild image and restart
+#
+# The OPENAI_API_KEY is read from the host environment — never from a file.
+# Set it on the VPS before running:
+#   export OPENAI_API_KEY=sk-...
+# or in your systemd service Environment= block (recommended for production).
+
+services:
+  sec-analyst:
+    build: .
+    image: sec-filings-analyst:latest
+    container_name: sec-analyst
+    ports:
+      - "127.0.0.1:8501:8501"    # bind to localhost only — nginx is the public entry point
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

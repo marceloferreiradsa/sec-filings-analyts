@@ -1,0 +1,53 @@
+# ─── .dockerignore ───────────────────────────────────────────────────────────
+# Prevents large files from being sent to the Docker build context.
+# Without this file, Docker sends the entire project directory (including
+# the virtualenv and raw data) to the daemon before building — causing
+# multi-GB transfers and potential disk exhaustion.
+#
+# Rule: exclude everything the Dockerfile does NOT explicitly COPY.
+# The Dockerfile copies only:
+#   requirements.txt
+#   app.py  retrieve.py  qa.py
+#   data/index/   ← FAISS index + chunks.json (must stay)
+
+# ── Python environment ────────────────────────────────────────────────────────
+.sec-analysis/          # virtualenv — 3-4 GB, never needed in container
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Data — pipeline outputs not needed at runtime ─────────────────────────────
+data/raw/               # raw downloaded SEC filings — large, pipeline-only
+data/processed/         # embeddings.npy + intermediate chunks — not used by app
+                        # Note: chunks.json lives in data/index/ (used by retrieve.py)
+
+# ── Pipeline scripts — not copied into container ──────────────────────────────
+ingest.py
+chunk.py
+embed.py
+index.py
+edgar_api.py
+html_parser.py
+document_builder.py
+
+# ── Evaluation and test scripts ───────────────────────────────────────────────
+evaluate.py
+test_*.py
+
+# ── Documentation and config ──────────────────────────────────────────────────
+*.md
+.env
+.env.example
+.vscode/
+.idea/
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

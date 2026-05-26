@@ -1,0 +1,31 @@
+# ─── Development requirements — local machine only ───────────────────────────
+# Install this on your local machine to run the full pipeline and evaluation.
+# Do NOT use this file in Docker — use requirements.txt instead.
+#
+# Usage:
+#   pip install -r requirements-dev.txt
+#
+# This file inherits all production packages then adds pipeline and eval tools.
+
+-r requirements.txt
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+# Used by: ingest.py, chunk.py, embed.py, html_parser.py, document_builder.py
+
+sentence-transformers>=3.0.0     # embed.py (local embedding option)
+sec-edgar-downloader>=5.0.0      # ingest.py (SEC EDGAR download)
+beautifulsoup4>=4.12.0           # html_parser.py (HTML section extraction)
+lxml>=5.0.0                      # html_parser.py (HTML parser backend)
+requests>=2.31.0                 # edgar_api.py (XBRL API calls)
+tqdm>=4.66.0                     # progress bars in pipeline scripts
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+# Used by: evaluate.py
+
+ragas==0.4.3                     # RAGAS evaluation (faithfulness, relevancy, etc.)
+
+# ── Note on torch ─────────────────────────────────────────────────────────────
+# sentence-transformers pulls in torch automatically.
+# If your machine has no GPU, install the CPU-only build to save 2 GB:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-dev.txt
